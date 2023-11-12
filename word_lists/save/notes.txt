@@ -1,0 +1,2 @@
+bonus: v1 american 80
+wl: v1 american 55
