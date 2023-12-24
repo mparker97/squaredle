@@ -3,16 +3,20 @@ Options:
 	sanitize FILE
 	cull FILE SUBFILE
 	alpha FILE out
+	problematic FILE
 	stats FILE
 	substring FILE SUBSTRING
+	qsubstring FILE SUBSTRING N_ERR
 	index FILE INDEX_LEN
 	length FILE MIN_LEN [MAX_LEN]
 	isogram FILE
+	compress FILE OUT INDEX_LEN
 */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 //#define DEBUG
@@ -20,13 +24,111 @@ Options:
 #define MAX_WORD_LEN 256
 #define WORD_BUFFER(v) char v[MAX_WORD_LEN + 1]
 
+const char* ALPHA_STR = "AAAAAAACEEEEIIIIDNOOOOO OUUUUY  ";
+
+int strdiff(const char* s0, const char* s1){
+	int i;
+	for (i = 0; s0[i] || s1[i]; i++){
+		if (s0[i] != s1[i]){
+			break;
+		}
+	}
+	return i;
+}
+
+struct char_stream{
+	char* str;
+	size_t sz;
+};
+
+#define CHAR_STREAM_INIT_SZ (1 << 8)
+
+int char_stream_init(struct char_stream* s){
+	s->str = malloc(CHAR_STREAM_INIT_SZ * sizeof(char));
+	if (s->str == NULL){
+		return 0;
+	}
+	s->sz = 0;
+	return 1;
+}
+
+void char_stream_deinit(struct char_stream* s){
+	free(s->str);
+	s->str = NULL;
+}
+
+int char_stream_write(struct char_stream* s, const char* n){
+	unsigned int i;
+	for (i = 0; n[i]; i++) {
+		if (!(s->sz & (s->sz - 1)) && s->sz >= CHAR_STREAM_INIT_SZ){
+			s->str = realloc(s->str, s->sz * 2);
+			if (s->str == NULL){
+				return 0;
+			}
+		}
+		s->str[s->sz++] = n[i];
+	}
+	return 1;
+}
+
+int check_int_arg(char* arg, char* name, int min, int max, int* ret){
+	char* endptr;
+	*ret = strtol(arg, &endptr, 10);
+	if (*endptr != '\0'){
+		fprintf(stderr, "Invalid value for %s: %s\n", name, arg);
+		return 0;
+	}
+	if (*ret < min){
+		fprintf(stderr, "Invalid value for %s: %d (minimum is %d)\n", name, *ret, min);
+		return 0;
+	}
+	if (*ret > max){
+		fprintf(stderr, "Invalid value for %s: %d (maximum is %d)\n", name, *ret, max);
+		return 0;
+	}
+	return 1;
+}
+
 void capitalize(char* c){
-	if (*c >= 'a' && *c <= 'z'){
-		*c -= 'a' - 'A';
+	if (c[0] >= 'a' && c[0] <= 'z'){
+		c[0] -= 'a' - 'A';
+	}
+	else if (c[0] == '\xc3' && c[1] >= '\xa0' && c[1] <= '\xbd' && c[1] != '\xb7'){
+		c[1] -= 0x20;
+	}
+}
+
+void alphatize(char* c){
+	int i, j;
+	char d, m;
+	for (i = 0; c[i]; i++){
+		if (c[i] == '\xc3'){
+			if (c[i + 1] == 0){
+				continue;
+			}
+			d = (c[i + 1] - '\x80') / 32;
+			m = (c[i + 1] - '\x80') % 32;
+			if (d > 1){ // beyond category
+				continue;
+			}
+			if (ALPHA_STR[m] == ' '){
+				continue;
+			}
+			c[i] = ALPHA_STR[m] + d * 0x20;
+			if (m == 0x06){ // ae
+				c[i + 1] = 'E' + d * 0x20;
+			}
+			else {
+				for (j = 1; c[i + j]; j++){
+					c[i + j] = c[i + j + 1];
+				}
+			}
+		}
 	}
 }
 
 int next_word_base(FILE* f, char* buf, int make_caps){
+	// TODO: return length of new word somehow?
 	int i;
 	char c;
 	if (feof(f)){
@@ -75,6 +177,7 @@ int sanitize_func(int argc, char* argv[], FILE* wl){
 	// Remove single-letter words except 'a'
 	// Remove words ending in "'s"
 	// Capitalize all letters
+	// Alphatize all letters
 	WORD_BUFFER(buf);
 	size_t l;
 	int i, cont;
@@ -86,9 +189,9 @@ int sanitize_func(int argc, char* argv[], FILE* wl){
 	total = count = 0;
 	for (cont = 1; cont; total++){
 		cont = next_word_base(wl, buf, 0);
-		if (buf[0] >= 'A' && buf[0] <= 'Z'){
-			continue;
-		}
+		//if (buf[0] >= 'A' && buf[0] <= 'Z'){
+		//	continue;
+		//}
 		l = strlen(buf);
 		if (l == 1){
 			if (buf[0] != 'a'){
@@ -101,6 +204,7 @@ int sanitize_func(int argc, char* argv[], FILE* wl){
 		for (i = 0; buf[i]; i++){
 			capitalize(&buf[i]);
 		}
+		alphatize(buf);
 		printf("%s\n", buf);
 		count++;
 	}
@@ -143,7 +247,7 @@ int cull_func(int argc, char* argv[], FILE* file){
 		else if (c < 0){
 			fprintf(stderr, "%s is in %s but not in %s\n", buf_subfile, argv[3], argv[2]);
 		}
-		else{
+		else {
 			count++;
 		}
 	}
@@ -230,6 +334,26 @@ next:;
 	return 0;
 }
 
+int problematic_func(int argc, char* argv[], FILE* wl){
+	WORD_BUFFER(buf);
+	int cont;
+	int count;
+	if (argc != 3){
+		fprintf(stderr, "Usage: %s %s FILE\n", argv[0], argv[1]);
+		return 1;
+	}
+	count = 0;
+	for (cont = 1; cont;){
+		cont = next_word(wl, buf);
+		if (!word_is_alpha(buf)){
+			printf("%s\n", buf);
+			count++;
+		}
+	}
+	fprintf(stderr, "%d problematic words\n", count);
+	return 0;
+}
+
 struct stats{
 	unsigned int n_words;
 	unsigned int n_letters;
@@ -285,19 +409,37 @@ int stats_func(int argc, char* argv[], FILE* wl){
 	return 0;
 }
 
+#define F_SUBSTRING_BA 1
+#define F_SUBSTRING_EA 2
+
+char* substring_flags(char* str, int* flags){
+	size_t l;
+	l = strlen(str);
+	*flags = 0;
+	if (str[l - 1] == '$'){
+		str[l - 1] = 0;
+		*flags |= F_SUBSTRING_EA;
+	}
+	if (str[0] == '^'){
+		str++;
+		*flags |= F_SUBSTRING_BA;
+	}
+	return str;
+}
+
 int substring_func(int argc, char* argv[], FILE* wl){
 	WORD_BUFFER(buf);
-	char* str;
-	size_t l;
-	int i, cont;
+	char* str, *p;
+	size_t l_buf, l_str;
+	int i, cont, flags;
 	unsigned int count;
 	if (argc != 4){
 		fprintf(stderr, "Usage: %s %s FILE SUBSTRING\n", argv[0], argv[1]);
 		return 1;
 	}
-	str = argv[3];
-	l = strlen(str);
-	if (l > MAX_WORD_LEN){
+	str = substring_flags(argv[3], &flags);
+	l_str = strlen(str);
+	if (l_str > MAX_WORD_LEN){
 		fprintf(stderr, "Substring \"%s\" is too long\n", str);
 		return 1;
 	}
@@ -307,7 +449,15 @@ int substring_func(int argc, char* argv[], FILE* wl){
 	count = 0;
 	for (cont = 1; cont;){
 		cont = next_word(wl, buf);
-		if (strstr(buf, str)){
+		l_buf = strlen(buf);
+		p = strstr(buf, str);
+		if (p){
+			if (flags & F_SUBSTRING_BA && p != buf){
+				continue;
+			}
+			if (flags & F_SUBSTRING_EA && p != buf + l_buf - l_str){
+				continue;
+			}
 			printf("%s\n", buf);
 			count++;
 		}
@@ -390,17 +540,11 @@ int q_substring_func(int argc, char* argv[], FILE* wl){
 		fprintf(stderr, "Substring \"%s\" is too long\n", str);
 		return 1;
 	}
-	n_err = strtol(argv[4], &endptr, 10);
-	if (*endptr != '\0' || n_err < 0){
-		fprintf(stderr, "Invalid value for N_ERR: %s\n", argv[4]);
+	if (!check_int_arg(argv[4], "N_ERR", 0, l - 1, &n_err)){
 		return 1;
 	}
 	if (n_err == 0){
 		return substring_func(argc - 1, argv, wl);
-	}
-	if (n_err >= l){
-		fprintf(stderr, "N_ERR of %d yields all words\n", n_err);
-		return 1;
 	}
 	for (i = 0; str[i]; i++){
 		capitalize(&str[i]);
@@ -418,23 +562,24 @@ int q_substring_func(int argc, char* argv[], FILE* wl){
 	return 0;
 }
 
+#define MAX_PREFIX_LEN 8
+
 int index_func(int argc, char* argv[], FILE* wl){
 	WORD_BUFFER(buf);
-	WORD_BUFFER(prefix);
+	char prefix[MAX_PREFIX_LEN + 1];
 	int i, cont;
 	int prefix_len;
+	unsigned int n_prefixes;
 	unsigned int count;
-	if (argc != 3){
+	if (argc != 4){
 		fprintf(stderr, "Usage: %s %s PREFIX_LEN\n", argv[0], argv[1]);
 		return 1;
 	}
-	prefix_len = atoi(argv[2]);
-	if (prefix_len < 1 || prefix_len >= MAX_WORD_LEN - 1){
-		fprintf(stderr, "Invalid prefix length %d\n", prefix_len);
+	if (!check_int_arg(argv[3], "PREFIX_LEN", 1, MAX_PREFIX_LEN, &prefix_len)){
 		return 1;
 	}
 	memset(prefix, 0, prefix_len + 1);
-	count = 0;
+	count = n_prefixes = 0;
 	for (cont = 1; cont;){
 		cont = next_word(wl, buf);
 		if (strlen(buf) < prefix_len){
@@ -445,11 +590,13 @@ int index_func(int argc, char* argv[], FILE* wl){
 				printf("%s: %u\n", prefix, count);
 			}
 			memcpy(prefix, buf, prefix_len);
+			n_prefixes++;
 			count = 0;
 		}
 		count++;
 	}
 	printf("%s: %u\n", prefix, count);
+	printf("%u prefixes\n", n_prefixes);
 	return 0;
 }
 
@@ -461,9 +608,7 @@ int length_func(int argc, char* argv[], FILE* wl){
 	unsigned int total, count;
 	max = MAX_WORD_LEN;
 	if (argc == 5){
-		max = atoi(argv[4]);
-		if (max < 1){
-			fprintf(stderr, "Invalid maximum length %d\n", max);
+		if (!check_int_arg(argv[4], "MAX_LEN", 1, max, &max)){
 			return 1;
 		}
 	}
@@ -471,13 +616,7 @@ int length_func(int argc, char* argv[], FILE* wl){
 		fprintf(stderr, "Usage: %s %s FILE MIN_LEN [MAX_LEN]\n", argv[0], argv[1]);
     return 1;
 	}
-	min = atoi(argv[3]);
-	if (min > MAX_WORD_LEN - 1){
-		fprintf(stderr, "Invalid minimum length %d\n", min);
-    return 1;
-	}
-	if (min > max){
-		fprintf(stderr, "Minimum length %d is greater than maximum length %d\n", min, max);
+	if (!check_int_arg(argv[3], "MIN_LEN", 1, max, &min)){
 		return 1;
 	}
 	total = count = 0;
@@ -499,6 +638,10 @@ int isogram_func(int argc, char* argv[], FILE* wl){
 	int i, cont;
 	unsigned int bm;
 	unsigned int count;
+	if (argc != 3){
+		fprintf(stderr, "Usage: %s %s\n", argv[0], argv[1]);
+		return 1;
+	}
 	count = 0;
 	for (cont = 1; cont;){
 		cont = next_word(wl, buf);
@@ -521,6 +664,100 @@ next:
 	return 0;
 }
 
+int compress_func(int argc, char* argv[], FILE* wl){
+	WORD_BUFFER(buf);
+	WORD_BUFFER(buf2);
+	char prefix[MAX_PREFIX_LEN + sizeof(unsigned int) + 1];
+	FILE* out;
+	struct stat st;
+	struct char_stream s;
+	int prefix_len;
+	int cflag, oflag;
+	int cont, ret;
+	int diff;
+	off_t sz;
+	unsigned int* pos;
+	unsigned int uint;
+	char c;
+	cflag = oflag = 0;
+	if (argc < 5){
+		fprintf(stderr, "Usage: %s %s FILE OUT PREFIX_LEN [-co]\n", argv[0], argv[1]);
+		return 1;
+	}
+	while ((c = getopt(argc - 4, &argv[4], "co")) != -1){
+		switch (c){
+			case 'c':
+				cflag = 1;
+				break;
+			case 'o':
+				oflag = 1;
+				break;
+			case '?':
+				fprintf(stderr, "Unknown option '%c'\n", c);
+				return 1;
+		}
+	}
+	out = fopen(argv[3], "w+");
+	if (out == NULL){
+		fprintf(stderr, "Failed to open file %s\n", argv[3]);
+		return 1;
+	}
+	s.str = NULL;
+	ret = 1;
+	if (!check_int_arg(argv[4], "PREFIX_LEN", 1, MAX_PREFIX_LEN, &prefix_len)){
+		goto fail;
+	}
+	if (!char_stream_init(&s)){
+		goto fail;
+	}
+	buf2[0] = 0;
+	memset(prefix, 0, sizeof(prefix));
+	pos = (unsigned int*)&prefix[prefix_len];
+	diff = 0;
+	fseek(out, sizeof(unsigned int), SEEK_SET);
+	//fwrite(uint, sizeof(unsigned int), 1, out);
+	for (cont = 1; cont;){
+		cont = next_word(wl, buf);
+		if (strlen(buf) < prefix_len){ // TODO
+			continue;
+		}
+		if (strncmp(prefix, buf, prefix_len) < 0){
+		//if (strcmp(prefix, buf) < 0){
+			memcpy(prefix, buf, prefix_len);
+			*pos = (unsigned int)ftell(out);
+			if (!char_stream_write(&s, prefix)){
+				fprintf(stderr, "str_stream_write failed\n");
+				goto fail;
+			}
+			prefix[prefix_len] = 0;
+		}
+		if (oflag){
+			diff = strdiff(buf, buf2);
+			strcpy(buf2 + diff, buf + diff);
+			if (diff < prefix_len){ // new prefix
+				diff = 0;
+			}
+			else {
+				fputc(diff, out);
+				diff -= prefix_len;
+			}
+		}
+		fprintf(out, "%s\n", buf + prefix_len + diff);
+	}
+	uint = ftell(out);
+	fwrite(s.str, sizeof(char), s.sz, out);
+	sz = ftell(out);
+	fseek(out, 0, SEEK_SET);
+	fwrite(&uint, sizeof(uint), 1, out);
+	fstat(fileno(wl), &st);
+	printf("Original size: %lld, compressed size: %lld (%.2f%%)\n", st.st_size, sz, ((double)sz / st.st_size - 1) * 100);
+	ret = 0;
+fail:
+	fclose(out);
+	char_stream_deinit(&s);
+	return ret;
+}
+
 /*
 	char r;
 	while ((r = getopt(argc, argv, "TODO")) != -1){
@@ -531,24 +768,28 @@ char* SUBCOMMAND_NAMES[] = {
 	"sanitize",
 	"cull",
 	"alpha",
+	"problematic",
 	"stats",
 	"substring",
 	"qsubstring",
 	"index",
 	"length",
-	"isogram"
+	"isogram",
+	"compress"
 };
 
 int (*SUBCOMMAND_FUNCS[])(int argc, char* argv[], FILE* wl) = {
 	sanitize_func,
 	cull_func,
 	alpha_func,
+	problematic_func,
 	stats_func,
 	substring_func,
 	q_substring_func,
 	index_func,
 	length_func,
-	isogram_func
+	isogram_func,
+	compress_func
 };
 
 int main(int argc, char* argv[]){

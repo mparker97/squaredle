@@ -4,174 +4,174 @@
 #include <string.h>
 #include "file.h"
 
+#define IDX_INIT_SZ 8
 #define COMP_NBITS 5
 
-struct line_stream{
-	char* buf; // malloc'd
-	char* curr; // ptr in buf
-	int fd;
-	int buf_sz;
-};
+/*
+	A compressed word file contains the following:
+	- A 4 byte unsigned int containing file position of the start of the index.
+	- The words first sorted in alphabetical order then with their prefixes removed.
+	- The index, which contains a list of entries of <string, uint> pairs of the
+		indexed prefix and the file position where the words with that prefix start.
+		These entries are sorted alphabetically by the prefix.
+*/
 
-struct index_entry{
-	char key[4];
-	unsigned int value;
+int index_init(struct index* idx, int idx_key_len){
+	idx->ls = malloc(sizeof(struct index_entry) * IDX_INIT_SZ);
+	idx->sz = 0;
+	idx->key_len = idx_key_len;
+	idx->file_pos = 0;
 }
 
-struct word_file{
-	struct index_entry* idx;
-	unsigned int idx_len;
-	unsigned int file_sz;
-	int fd;
-};
+void index_deinit(struct index* idx){
+	int i;
+	for (i = 0; i < idx->sz; i++){
+		free(idx->ls[i].key);
+	}
+	free(idx->ls);
+}
 
-int line_stream_init(struct line_stream* ls, char* f, int buf_sz){
-	ls->buf = malloc(buf_sz);
-	if (ls->buf == NULL){
-		return -1
+int index_add(struct index* idx, char* prefix, unsigned int pos){
+	if (!(idx->sz & (idx->sz - 1)) && idx->sz >= IDX_INIT_SZ){
+		idx->ls = realloc(sizeof(struct index_entry) * idx->sz * 2);
+		if (idx->ls == NULL){
+			return 1;
+		}
 	}
-	ls->fd = open(f, O_RDONLY);
-	if (ls->fd < 0){
-		free(ls->buf);
-		return -1;
+	idx->ls[idx->sz].key = strndup(prefix, idx->key_len);
+	if (idx->ls[idx->sz].key == NULL){
+		// TODO: strndup failed
+		return 1;
 	}
-	ls->buf_sz = buf_sz;
-	ls->curr = &ls->buf[buf_sz - 1];
-	ls->curr[0] = 0;
+	idx->ls[idx->sz].value = pos;
+	idx->sz++;
 	return 0;
 }
 
-void line_stream_deinit(struct line_stream* ls){
-	free(ls->buf);
-	if (ls->fd > 0){
-		close(ls->fd);
+// Given details in 'cfg', compress an uncompressed word file
+int compress_word_file(const struct compress_cfg* cfg){
+	// TODO: what if cfg->min_word_len < cfg->idx_key_len?
+	struct index idx;
+	FILE* src;
+	FILE* dst0;
+	FILE* dst1;
+	char* buf;
+	char* prefix;
+	unsigned int i, ret;
+	char c;
+	ret = 1;
+	if (index_init(&idx, cfg->idx_key_len) != 0){
+		// TODO
+		goto fail0;
 	}
-}
-
-void line_stream_reset(struct line_stream* ls){
-	seek(ls->fd, 0, SEEK_SET);
-	ls->curr = &ls->buf[buf_sz - 1];
-}
-
-char* line_stream_next(struct line_stream* ls){
-	char* s, *t;
-	ssize_t nb;
-	int i;
+	src = fopen(cfg->word_file, "r");
+	if (src == NULL){
+		// TODO
+		goto fail1;
+	}
+	dst = fopen(cfg->compress_file, "x");
+	if (dst == NULL){
+		// TODO
+		goto fail2;
+	}
+	buf = malloc(cfg->max_word_len);
+	if (buf == NULL){
+		// TODO:
+		goto fail3;
+	}
+	prefix = malloc(idx.key_len + 1);
+	if (prefix == NULL){
+		// TODO:
+		goto fail;
+	}
+	// Write space for the unsigned int giving the position of the index
+	memset(prefix, 0, sizeof(prefix));
+	fwrite(&i, sizeof(i), 1,  dst);
+	// Go through words by char
 	for (;;){
-		s = strchr(ls->curr, '\n');
-		if (s){
-			// newline found; tokenize
-			*s = 0;
-			t = ls->curr
-			ls->curr = s + 1;
-			return t;
-		}
-		if (ls->curr == ls->buf){
-			// TODO: word is longer than buffer
-			return NULL;
-		}
-		// (memcpy curr to buf)
-		for (i = 0; ls->curr[i]; i++){
-			ls->buf[i] = ls->curr[i];
-		}
-		nb = read(ls->fd, &ls->buf[i], ls->buf_sz - i - 1);
-		if (nb < 0){
-			// TODO: read failed
-			return NULL;
-		}
-		if (nb == 0 && i == 0){
-			// done
-			return NULL;
-		}
-		if (nb < ls->buf_sz - i - 1){
-			if (ls->buf[i + nb - 1] != '\n'){
-				ls->buf[i + nb] = '\n';
-				nb++;
+		for (i = 0; i < cfg->max_word_len; i++){
+			buf[i] = fgetc(src);
+			if (buf[i] == '\n'){
+				// End of word; check if it is long enough
+				if (i >= cfg->min_word_len){
+					// Add prefix to index if it is different
+					if (strncmp(buf, prefix, idx.key_len) != 0){
+						memcpy(prefix, buf, idx.key_len);
+						index_add(&idx, prefix, ftell(dst));
+					}
+					// Write word without prefix to compressed file
+					fwrite(buf + idx.key_len, sizeof(char), i - idx.key_len, dst);
+					fputc(dst, 0);
+				}
+				goto next_word;
 			}
-			ls->buf[i + nb] = 0;
+			else if (buf[i] == EOF){
+				// Done reading words
+				if (ferror(src) != 0){
+					// TODO
+					goto fail;
+				}
+				else if (i == 0){
+					goto done;
+				}
+				else{
+					// TODO
+					goto fail;
+				}
+			}
+			else{
+				// Convert letter to uppercase
+				c = make_uppercase(&buf[i]);
+				if (c < 0){
+					// TODO
+					goto fail;
+				}
+				buf[i] = c;
+			}
 		}
-		ls->curr = ls->buf;
+		if (i == cfg->max_word_len){
+			// TODO
+			goto fail;
+		}
+next_word:;
 	}
+done:
+	// Mark position where index starts
+	idx.file_pos = ftell(dst);
+	// Write index
+	fwrite(idx.ls, sizeof(struct index_entry), idx.sz, dst);
+	if (ferror(dst)){
+		// TODO
+		goto fail;
+	}
+	// Write position where index starts to saved space at beginning of file
+	fseek(dst, 0, SEEK_SET);
+	fwrite(&idx.file_pos, sizeof(idx.file_pos), 1, dst);
+	if (ferror(dst)){
+		// TODO
+		goto fail;
+	}
+	ret = 0;
+fail:
+	free(prefix);
+fail3:
+	free(buf);
+fail2:
+	fclose(dst);
+fail1:
+	fclose(src);
+fail0:
+	index_deinit(&idx);
 }
 
-int compress_word_file(struct compress_cfg* cfg){
-	struct line_stream ls;
-	FILE* cfile_idx;
-	FILE* cfile_data;
-	char sz_buf[4];
-	char* s;
-	char* idx;
-	int i, prefix_streak;
-
-	if (line_stream_init(&ls, cfg->word_file, cfg->max_word_len + 2) < 0){
-		goto cleanup;
-	}
-	cfile_data = fopen(cfg->compress_file, 'x');
-	if (cfile_data == NULL){
-		// TODO
-		return -1;
-	}
-	idx = malloc((compress_cfg->idx_len + 1) * sizeof(char));
-	if (idx == NULL){
-		// TODO
-	}
-
-	memset(idx, 0, (compress_cfg->idx_len + 1) * sizeof(char));
-	memset(sz_buf, 0, sizeof(sz_buf));
-	prefix_streak = 0;
-	for (prefix_streak = 0; s = line_stream_next(&ls); prefix_streak++){
-		for (i = 0; s[i]; i++){
-			if (s[i] >= 'a' && s[i] <= 'z'){
-				s[i] -= ('a' - 'A');
-			}
-			else if (s[i] < 'A' || s[i] > 'Z'){
-				printf("Invalid character in source file: %c\n", s[i]);
-				goto error;
-			}
-			ht_inc(&cfg->letter_ht, s[i] - 'A');
-		}
-		if (!strncmp(idx, s, compress_cfg->idx_len * sizeof(char))){
-			// TODO: new index
-			ht_dyn_inc(&cfg->len_ht, prefix_streak); // TODO: prefix streak is inaccurate here
-			memcpy(idx, s, compress_cfg->idx_len * sizeof(char));
-			// TODO: check fwrite rc
-			fwrite(s, compress_cfg->idx_len + 1, sizeof(char), cfile_data);
-			fwrite(sz_buf, 4, sizeof(char), cfile_data);
-			prefix_streak = 0;
-		}
-	}
-
-	cfile_idx = fopen(cfg->compress_file, 'x');
-	if (cfile_idx == NULL){
-		// TODO
-		return -1;
-	}
-	line_stream_reset(&ls);
-	memset(idx, 0, sizeof(idx));
-	while (s = line_stream_next(&ls)){
-		if (!strncmp(idx, s, compress_cfg->idx_len * sizeof(char))){
-			i = ftell(cfile_data);
-			fseek(cfile_idx, (compress_cfg->idx_len + 1) * sizeof(char), SEEK_CUR);
-			fwrite(&i, 4, sizeof(char), cfile_idx); // TODO: error?
-		}
-		ht_write_string(&cfg->letter_ht, cfile_data, s); // TODO: error?
-	}
-
-	goto cleanup;
-error:
-cleanup:
-	fclose(cfile_idx);
-	fclose(cfile_data);
-	line_stream_deinit(&ls);
-}
-
-struct index_entry* index_bin_search(struct word_file* wf, char* word){
+// Binary search for the entry in the index 'idx' corresponding to 'word'
+struct index_entry* index_bin_search(const struct index* idx, const char* word){
 	unsigned int low, high, mid, cmp;
 	low = 0;
-	high = wf->idx_len;
+	high = idx->sz;
 	while (low < high){
 		mid = (low + high) / 2;
-		cmp = strncmp(word, wf->idx[mid].key, 3);
+		cmp = strncmp(word, idx->ls[mid].key, idx->key_len - 1);
 		if (cmp < 0){
 			high = mid;
 		}
@@ -179,108 +179,79 @@ struct index_entry* index_bin_search(struct word_file* wf, char* word){
 			low = mid + 1;
 		}
 		else{
-			return &wf->idx[mid];
+			return &idx->ls[mid];
 		}
 	}
 	// TODO: error; not found
 	return NULL;
 }
 
-int word_file_idx_poses(struct word_file* wf, char* word, unsigned int* low_pos, unsigned int* high_pos){
-	struct index_entry* idx = index_bin_search(wf, word);
-	if (idx == NULL){
+// Return in 'low_pos' and 'high_pos' the position bounds in the file where 'word' may be located
+int word_file_idx_pos(const struct word_file* wf, const char* word, unsigned int* low_pos, unsigned int* high_pos){
+	struct index_entry* x = index_bin_search(&wf->idx, word);
+	if (x == NULL){
 		// TODO: error
-		return -1
+		return 1;
 	}
-	*low_pos = idx[0].value;
-	if (idx == &wf->idx[wf->idx_len]){
-		*high_pos = wf->file_sz;
+	*low_pos = x[0].value;
+	if (x == &wf->idx.ls[wf->idx.sz - 1]){
+		// Last index entry, upper bound is index position
+		*high_pos = wf->idx.file_pos;
 	}
 	else{
-		*high_pos = idx[1].value;
+		*high_pos = x[1].value;
 	}
-	return 0
+	return 0;
 }
 
-int word_valid(struct word_file* wf, char* word){
-	unsigned int base, low, high, mid, i;
-	int bit, old_bit;
-	char buf[MAX_WORD_LEN + 1]; // TODO
-	char b0, b1;
+// Return 0 if 'word' is a valid word, otherwise 1
+int word_valid(const struct word_file* wf, const char* word){
+	unsigned int low, high, mid;
+	int i, j, k;
+	char buf[wf->max_word_len + 2];
 	if (word_file_idx_pos(wf, word, &low, &high) < 0){
 		// TODO: fail
 		return -1;
 	}
+	// Binary search within [low, high) file position range for word
 	base = low;
 	while (low < high){
+		memset(buf, wf->max_word_len + 1, 0);
 		mid = low + (high - low) / 2;
-		old_bit = bit = ((mid - base) * BPB) % COMP_NBITS;
-		seek(wf->fd, mid, SEEK_SET);
-		memset(buf, MAX_WORD_LEN, 0);
-		b1 = getc(wf->fd);
-		for (i = MAX_WORD_LEN - 1;; i--){
-			if (i == 0){
-				// TODO: word too long
-				return -1;
+		fseek(wf->f, mid + 1, SEEK_SET);
+		i = wf->max_word_len;
+		// Search in reverse for end of previous word
+		do{
+			if (i < 0){
+				// TODO: word in file too long
 			}
-			if (bit < COMP_NBITS){
-				seek(wf->fd, -2, SEEK_CUR);
-				b0 = getc(wf->fd);
-				buf[i] = 'A' + (b0 >> (BPB - (COMP_NBITS - bit))) | (b1 & ((1 << bit) - 1)) << (COMP_NBITS - bit);
-				b1 = b0;
-			}
-			else{
-				buf[i] = 'A' + ((b1 >> (bit - COMP_NBITS)) & ((1 << COMP_NBITS) - 1));
-			}	
-			if (buf[i] == 'Z' + 1){
-				for (j = 0, i++; buf[i + j]; j++){
-					if (word[j] < buf[i + j]){ // TODO: remove prefix?
-						// if length of word is too short, word[j] = 0 should've failed this check
-						high = mid - ((MAX_WORD_LEN - 1 - (i - 2)) * COMP_NBITS + (BPB - 1)) / BPB;
-						goto next_while;
-					}
-					else if (word[j] > buf[i + j]){
-						low = mid + 1;
-						goto next_while;
-					}
-					buf[j] = buf[i + j];
-				}
-				break;
-			}
-			bit = (bit + BPB - COMP_NBITS) % BPB;
+			fseek(wf->f, -2, SEEK_CUR);
+			buf[i] = fgetc(wf->f);
 		}
-		bit = old_bit;
-		seek(wf->fd, mid, SEEK_SET);
-		b0 = getc(wf->fd);
-		for (; j < MAX_WORD_LEN; j++){
-			if (bit > BPB - COMP_NBITS){
-				b1 = getc(wf->fd);
-				buf[j] = 'A' + (b0 >> bit) | (b1 << (BPB - bit));
-				b0 = b1;
+		while (buf[i--] != 0);
+		// Compare what we have so far; and skip if it doesn't match
+		j = strncmp(&buf[i + 2], word + wf->idx.key_len, wf->max_word_len - (i + 2) + 1);
+		if (j == 0){
+			// They match so far; shift buffer contents to the beginning
+			for (; i + 2 + j < wf->max_word_len + 1; j++){
+				buf[j] = buf[i + 2 + j];
 			}
-			else{
-				buf[j] = 'A' + ((b0 >> bit) & ((1 << COMP_NBITS) - 1));
+			// Advance forward to the end of the word and compare
+			fseek(wf->f, mid, SEEK_SET);
+			fread(&buf[j], sizeof(char), wf->max_word_len - j, wf->f);
+			k = strlen(&buf[j + 1]); // find end of string to skip over it if we recurse high
+			j = strcmp(&buf[j + 1], &word[wf->idx.key_len + j + 1]);
+			if (j == 0){
+				return 1; // Matches; word found
 			}
-			if (word[j] < buf[j]){
-				// if length of word is too short, word[j] = 0 should've failed this check
-				high = mid - ((MAX_WORD_LEN - 1 - (i - 2)) * COMP_NBITS + (BPB - 1)) / BPB;
-				goto next_while;
-			}
-			else if (word[j] > buf[j]){
-				low = mid + ((MAX_WORD_LEN - 1 - (i - 1) + (j + 1)) * COMP_NBITS + (BPB - 1)) / BPB;
-				goto next_while;
-			}
-			else if (word[j] == 0){
-				// TODO: found it
-				return 1;
-			}
-			bit = (bit + BPB - COMP_NBITS) % BPB;
 		}
-		// TODO: word too long
-		return -1;
-next_while:
+		if (j < 0){
+			low = mid + k;
+		}
+		else{
+			high = mid - (wf->max_word_len - i + 2);
+		}
 	}
-	// didn't find it
 	return 0;
 }
 

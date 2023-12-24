@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include "board.h"
+#include "common.h"
 
 #define WORD_LIST_MIN_SZ 8
 
@@ -16,42 +17,34 @@ void tile_list_free(struct tile_list* tl){
 	// TODO: free tl?
 }
 
-char* word_list_add(struct word_list* wl, char* word){
-	if (!(wl->sz & ~(wl->sz - 1)) && wl->sz > WORD_LIST_MIN_SZ){
-		wl->list = realloc(wl->sz * 2 * sizeof(*wl->list));
-		if (wl->list == NULL){
-			// TODO: error
-			return NULL;
-		}
-	}
-	if (!(wl->list[wl->sz++] = strdup(word))){
+struct word_data* word_list_add(struct word_list* wl, const unsigned char* n, unsigned char n_wildcard, unsigned char n_repeat){
+	struct word_data* ret;
+	unsigned char* z;
+	z = strdup(n);
+	if (z == NULL){
 		// TODO: error
 		return NULL;
 	}
-	return wl->list[wl->sz - 1];
-}
-
-// Append list b to the end of list a
-// Accessing b's list after this function is indeterminate
-int word_list_combine(struct word_list* a, struct word_list* b){
-	a->list = realloc(POW2_ROUNDUP(a->sz + b->sz) * sizeof(*a->list));
-	if (a->list == NULL){
-		// TODO: realloc failed
-		return 0;
+	ret = a_list_add(wl);
+	if (ret == NULL){
+		free(z);
+		// TODO: error
+		return NULL;
 	}
-	memcpy(&a->list[a->sz], b->list, b->sz * sizeof(*b->list));
-	a->sz += b->sz;
-	free(b->list);
-	b->list = NULL;
-	return 1;
-}
+	ret->word = z;
+	ret->n_wildcard = n_wildcard;
+	ret->n_repeat = n_repeat;
+	return ret;
+} 
+
+#define word_list_combine(x, y) a_list_combine((struct a_list*)(x), (struct a_list*)(y))
 
 // Sort by length then alphabetically
 int word_list_sort_func(const void* a_, const void* b_){
-	char* a, *b;
+	unsigned char* a, *b;
 	int la, lb;
-	a = (char*)a_;
-	b = (char*)b_;
+	a = (unsigned char*)a_;
+	b = (unsigned char*)b_;
 	la = strlen(a);
 	lb = strlen(b);
 	if (la != lb){
@@ -67,41 +60,75 @@ void word_list_sort(struct word_list* wl){
 void word_list_deinit(struct word_list* wl){
 	int i;
 	for (i = 0; i < wl->sz; i++){
-		free(wl->list[i]);
+		free(wl->list[i].word);
 	}
 	free(wl->list);
 }
 
-int word_list_init(struct word_list* wl){
-	wl->list = malloc(WORD_LIST_MIN_SZ * sizeof(*wl->list));
-	if (wl->list == NULL){
-		// TODO: error
-		return 0;
-	}
-	wl->sz = WORD_LIST_MIN_SZ;
-	return 1;
-}
+#define word_list_init(x, e) a_list_init((struct a_list*)(x), e)
 
-// Create the word-length index for f->wl.
-// f->wl must be sorted by word_list_sort.
-int word_list_finalize(struct word_list_final* f){
+// Create the word-length index for wl.
+// wl must be sorted by word_list_sort.
+bool word_list_finalize(struct word_list* wl){
 	int i, max_len;
-	max_len = strlen(f->wl.list[f->wl.sz - 1]);
-	f->idx = calloc(max_len, sizeof(struct wlf_idx));
-	if (f->idx == NULL){
+	max_len = strlen(wl->list[wl->sz - 1]);
+	wl->idx = calloc(max_len + 1, sizeof(int));
+	if (wl->idx == NULL){
 		// TODO: error
-		return 0;
+		return FALSE;
 	}
-	for (i = 0; i < f->wl.sz; i++){
-		f->idx[strlen(f->wl.list[i])].idx++;
+	// Count number of words for each length
+	for (i = 0; i < wl->sz; i++){
+		wl->idx[strlen(wl->list[i]) + 1]++;
 	}
-	f->idx_sz = max_len;
-	return 1;
+	// Accumulate counts
+	for (i = 1; i < max_len; i++){
+		wl->idx[i] += wl->idx[i - 1];
+	}
+	wl->idx_sz = max_len;
+	return TRUE;
 }
 
-void obfuscate_word(char* buf, const char* word){
+const static char OBFUSCATE_PRE_LENS[5][7] = {
+	{0x00, 0x00, 0x00, 0x11, 0x11, 0x22, 0x22},
+	{0x00, 0x00, 0x10, 0x11, 0x22, 0x22, 0x33},
+	{0x00, 0x00, 0x11, 0x22, 0x22, 0x22, 0x33},
+	{0x00, 0x10, 0x21, 0x22, 0x33, 0x33, 0x44},
+	{0x00, 0x10, 0x12, 0x32, 0x33, 0x43, 0x44}
+};
+const static char OBFUSCATE_POST_LENS[5][7] = {
+	{0x00, 0x00, 0x00, 0x00, 0x11, 0x11, 0x22},
+	{0x00, 0x00, 0x00, 0x10, 0x11, 0x22, 0x22},
+	{0x00, 0x00, 0x00, 0x10, 0x22, 0x33, 0x33},
+	{0x00, 0x00, 0x00, 0x21, 0x22, 0x33, 0x33},
+	{0x00, 0x00, 0x10, 0x11, 0x32, 0x33, 0x43}
+};
+
+void obfuscate_word(unsigned char* buf, const struct word_data* wd){
 	/*
-	level 0:
+	level 0: all asterisks
+	level 1:
+	5-	: *****					(0, 0)
+	6		: a*****				(1, 0)
+	7		: a******				(1, 0)
+	8		: a******h			(1, 1)
+	9		: a*******i			(1, 1)
+	10	: ab*******j		(2, 1)
+	11	: ab********k		(2, 1)
+	12+	: ab********kl	(2, 2)
+	level 2:
+	4-	: ****					(0, 0)
+	5		: a****					(1, 0)
+	6		: a*****				(1, 0)
+	7		: a*****g				(1, 1)
+	8		: ab*****h			(2, 1)
+	9		: ab******i			(2, 1)
+	10	: ab******ij		(2, 2)
+	11	: ab*******jk		(2, 2)
+	12+	: ab********kl	(2, 2)
+	13+	: abc*******kl	(3, 2)
+	level 3:
+	3-	: ***						(0, 0)
 	4		: a***					(1, 0)
 	5		: a****					(1, 0)
 	6		: ab****				(2, 0)
@@ -111,37 +138,41 @@ void obfuscate_word(char* buf, const char* word){
 	10	: ab*****hij		(2, 3)
 	11	: ab******ijk		(2, 3)
 	12+	: abc******jkl	(3, 3)
-	level 1:
-	4		: ab**					(2, 0)
+	level 4:
+	2-	: **						(0, 0)
+	3		: a**						(1, 0)
+	4		: a***					(1, 0)
 	5		: ab***					(2, 0)
 	6		: ab***f				(2, 1)
-	7		: abc***g				(3, 1)
+	7		: ab***fg				(2, 2)
 	8		: abc***gh			(3, 2)
 	9		: abc****hi			(3, 2)
 	10	: abc****hij		(3, 3)
 	11	: abc*****ijk		(3, 3)
 	12+	: abcd*****jkl	(4, 3)
+	level 5:
+	2-	: **						(0, 0)
+	3		: a**						(1, 0)
+	4		: ab**					(2, 0)
+	5		: a***e					(1, 1)
+	6		: ab***f				(2, 1)
+	7		: abc***g				(3, 1)
+	8		: abc***gh			(3, 2)
+	9		: abc***ghi			(3, 3)
+	10	: abc****hij		(3, 3)
+	11	: abcd****ijk		(4, 3)
+	12	: abcd*****jkl	(4, 3)
+	13+	: abcd*****jklm	(4, 4)
 	*/
-	// TODO: level
 	int len, before, after;
 	len = strlen(word);
-	if (len >= 12){
-		before = after = 3;
-	}
-	else{
-		after = len / 2 - 2;
-		if (len < 6){
-			before = 1;
-		}
-		else{
-			before = 2;
-			if (len == 6){
-				after == 0;
-			}
-		}
-	}
+	min_update(len, 13);
 	memcpy(buf, word, len + 1);
-	memset(buf + before, '*', len - before - after);
+	if (wd->obfuscation_level != 0){
+		before = (OBFUSCATE_PRE_LENS[wd->obfuscation_level - 1][len / 2] >> ((len % 2) * 4)) & 0xf;
+		after = (OBFUSCATE_POST_LENS[wd->obfuscation_level - 1][len / 2] >> ((len % 2) * 4)) & 0xf;
+		memset(buf + before, '*', len - before - after);
+	}
 }
 
 #define GWL_MARKED 1
@@ -149,22 +180,34 @@ void obfuscate_word(char* buf, const char* word){
 #define GWL_START 4
 #define GWL_WILDCARD_SHIFT 3
 
+struct gwl_mark{
+	struct tile* board;
+	pthread_mutex_t board_lock;
+	int len; // length of board
+	int inc; // How much to increment each count (+1 or -1)
+	unsigned char n_wildcard;
+	unsigned char n_repeat;
+};
+
 struct gwl_struct{
 	struct word_file* wf;
-	struct tile* board;
-	int len; // length of board
-	pthread_mutex_t board_lock;
 	pthread_mutex_t idx_lock;
-	adjacency_bitmap_t adjacency_bitmap;;
-	int processed; // number of prefixes processed [locked]
-	int inc;
+	adjacency_bitmap_t adjacency_bitmap;
+	struct gwl_mark mark;
+	int processed; // number of prefixes processed [@idx_lock]
 };
 
 struct gwl_recurse{
 	struct tile* board;
-	const char* word;
-	char* bm;
+	const unsigned char* word;
+	unsigned char* bm;
 	int depth;
+	// # of wildcards encountered and low watermark
+	unsigned char wildcard_ref;
+	unsigned char n_wildcard;
+	// # of can_repeats encountered and low watermark
+	unsigned char repeat_ref;
+	unsigned char n_repeat;
 };
 
 struct gwl_ret{
@@ -172,37 +215,63 @@ struct gwl_ret{
 	struct word_list bonus;
 };
 
+bool gwl_mark_words_helper(struct gwl_recurse* gwlr, struct tile* t);
+
+bool gwl_mark_words_helper_tile(struct gwl_recurse* gwlr, struct tile* n){
+	bool ret;
+	int j;
+	bool wildcard_flag, repeat_flag;
+	wildcard_flag = repeat_flag = FALSE;
+	j = (n - gwlr->board) / sizeof(struct tile);
+	if (n->letter == WILDCARD){
+		if (gwlr->bm[j] >> GWL_WILDCARD_SHIFT == 0){
+			// Wildcard not yet used; set it to this letter
+			gwlr->bm[j] |= (word[0] - 'A' + 1) << GWL_WILDCARD_SHIFT;
+		}
+		else if (gwlr->bm[j] >> GWL_WILDCARD_SHIFT != gwlr->word[gwlr->depth - 1] - 'A' + 1){
+			// Wildcard used as a different letter; dead end
+			return FALSE;
+		}
+		wildcard_flag = TRUE;
+	}
+	else if (n->letter != gwlr->word[gwlr->depth - 1]){
+		// Wrong letter; dead end
+		return FALSE;
+	}
+	if (n->can_repeat){
+		repeat_flag = TRUE;
+	}
+	else if (gwlr->bm[j] & GWL_VISITED){
+		// Already visited; dead end
+		return FALSE;
+	}
+	gwlr->bm[j] |= GWL_VISITED;
+	gwlr->wildcard_ref += wildcard_flag;
+	gwlr->repeat_ref += repeat_flag;
+	if (ret = gwl_mark_words_helper(gwlr, n)){
+		gwlr->bm[j] |= GWL_MARKED;
+	}
+	gwlr->repeat_ref -= repeat_flag;
+	gwlr->wildcard_ref -= wildcard_flag;
+	gwlr->bm[j] &= ~GWL_VISITED;
+	return ret;
+}
+
 // Recursive function to search for the word in the board
-int gwl_mark_words_helper(struct gwl_recurse* gwlr, struct tile* t){
-	int ret, i, j;
-	ret = 0;
+bool gwl_mark_words_helper(struct gwl_recurse* gwlr, struct tile* t){
+	bool ret;
+	int i;
+	ret = FALSE;
 	if (gwlr->word[gwlr->depth] = 0){
 		// word found
-		ret = 1;
+		min_update(gwlr->n_wildcard, gwlr->wildcard_ref);
+		min_update(gwlr->n_repeat, gwlr->repeat_ref);
+		ret = TRUE;
 	}
-	else{
+	else {
 		gwlr->depth++;
 		for (i = 0; i < t->neighbors_len; i++){
-			j = (t->neighbors[i] - gwlr->board) / sizeof(struct tile);
-			if (t->neighbors[i].letter == WILDCARD){
-				if (gwlr->bm[j] >> GWL_WILDCARD_SHIFT == 0){ // TODO: could also check VISITED
-					gwlr->bm[i] |= (word[0] - 'A' + 1) << GWL_WILDCARD_SHIFT;
-				}
-				else if (gwlr->bm[j] >> GWL_WILDCARD_SHIFT != gwlr->word[gwlr->depth - 1] - 'A' + 1){
-					continue;
-				}
-			}
-			else if (t->neighbors[i].letter != gwlr->word[gwlr->depth - 1]){
-				continue;
-			}
-			if (!(gwlr->bm[j] & GWL_VISITED) || t->neighbors[i].can_repeat){
-				gwlr->bm[j] |= GWL_VISITED;
-				if (gwl_mark_words_helper(gwlr, &t->neighbors[i])){
-					gwlr->bm[j] |= GWL_MARKED;
-					ret = 1;
-				}
-				gwlr->bm[j] &= ~GWL_VISITED;
-			}
+			ret |= gwl_mark_words_helper_tile(gwlr, &t->neighbors[i])
 		}
 		gwlr->depth--;
 	}
@@ -211,52 +280,52 @@ int gwl_mark_words_helper(struct gwl_recurse* gwlr, struct tile* t){
 
 // Search for 'word' in the board, marking all tiles that are part of an instance in a bitmap
 // Then, grab the board lock and adjust the freqs according to the bitmap
-int gwl_mark_words(struct gwl_struct* s, const char* word){
+bool gwl_mark_words(struct gwl_mark* m, const unsigned char* word){ 
 	struct gwl_recurse gwlr;
-	int ret, i;
-	gwlr.board = s->board;
+	bool ret;
+	int i;
+	gwlr.board = m->board;
 	gwlr.word = word;
-	gwlr.bm = calloc(s->len, sizeof(char));
+	gwlr.bm = calloc(m->len, sizeof(unsigned char));
 	if (gwlr.bm == NULL){
 		// TODO: fail
 	}
 	gwlr.depth = 1;
-	ret = 0;
+	gwlr.wildcard_ref = 0;
+	gwlr.n_wildcard = -1;
+	gwlr.repeat_ref = 0;
+	gwlr.n_repeat = -1;
+	ret = FALSE;
 	// Loop through all tiles to start searching for 'word'
-	for (i = 0; i < s->len; i++){
-		if (s->board[i].letter == WILDCARD){
-			gwlr.bm[i] |= (word[0] - 'A' + 1) << GWL_WILDCARD_SHIFT;
+	for (i = 0; i < m->len; i++){
+		if (gwl_recurse_helper_tile(&gwlr, &m->board[i])){
+			gwlr.bm[i] |= GWL_START;
+			ret = TRUE;
 		}
-		else if (s->board[i].letter != word[0]){
-			continue;
-		}
-		gwlr.bm[i] |= GWL_VISITED;
-		if (gwl_mark_words_helper(gwlr, &s->board[i])){
-			gwlr.bm[i] |= GWL_MARKED | GWL_START;
-			ret = 1;
-		}
-		gwlr.bm[i] &= ~GWL_VISITED;
 	}
 	if (ret){
 		// Word was found; mark freqs in board
-		pthread_mutex_lock(&s->board_lock);
-		for (i = 0; i < s->len; i++){
+		// These mark ALL paths that make the word
+		pthread_mutex_lock(&m->board_lock);
+		for (i = 0; i < m->len; i++){
 			if (gwlr.bm[i] & GWL_MARKED){
-				s->board[i].freq += s->inc;
+				m->board[i].freq += m->inc;
 			}
 			if (gwlr.bm[i] & GWL_START){
-				s->board[i].start_freq += s->inc;
+				m->board[i].start_freq += m->inc;
 			}
 		}
-		pthread_mutex_unlock(&s->board_lock);
+		pthread_mutex_unlock(&m->board_lock);
 	}
 	free(bm);
+	m->n_wildcard = gwlr.n_wildcard;
+	m->n_repeat = gwlr.n_repeat;
 	return ret;
 }
 
 // Loop through words in word file that start with the prefix indexed at 'x'
-struct word_list* gwl_parse_prefix(struct gwl_struct* s, struct gwl_ret* r, int x){
-	char buf[MAX_WORD_LEN + 1];
+int gwl_parse_prefix(struct gwl_struct* s, struct gwl_ret* r, int x){
+	word_buffer_t buf;
 	unsigned int pos, high;
 	int i, j, k;
 	char type;
@@ -264,16 +333,17 @@ struct word_list* gwl_parse_prefix(struct gwl_struct* s, struct gwl_ret* r, int 
 	buf[s->wf.idx.key_len] = 0;
 	// Check that adjacency bitmap allows this prefix
 	if (!adjacency_bitmap_all(s->adjacency_bitmap, buf)){
-		return r;
+		return 1;
 	}
 	// Get bounds for this prefix
 	pos = s->wf.idx.ls[x].value;
 	if (x == s->wf.idx.sz - 1){
 		high = s->wf.idx.file_pos;
 	}
-	else{
+	else {
 		high = s->wf.idx.ls[x + 1].value
 	}
+	fseek(s->wf, pos, SEEK_SET);
 	// Loop through the words
 	// j starts at key_len because prefixes are stripped off in word file
 	for (i = pos, j = s->wf.idx.key_len; i < high; i++){
@@ -286,29 +356,29 @@ struct word_list* gwl_parse_prefix(struct gwl_struct* s, struct gwl_ret* r, int 
 			buf[j] = 0;
 			// End of word; search for it in board then reset back to the prefix
 			// First check the adjacency bitmap
-			if (!adjacency_bitmap_all(s->adjacency_bitmap, buf)){
-				goto not_found;
-			}
-			if (gwl_mark_words(s, buf)){
-				if (type == 0){
-					if (word_list_add(&r->wl, buf) == NULL){
-						// TODO: error
+			if (adjacency_bitmap_all(s->adjacency_bitmap, buf)){
+				// Now search the board
+				if (gwl_mark_words(s, buf)){
+					if (type == 0){
+						if (word_list_add(&r->wl, buf, s->mark.n_wildcard, s->mark.n_repeat) == NULL){
+							// TODO: error
+						}
+					}
+					else { // type == 1
+						if (word_list_add(&r->bonus, buf, s->mark.n_wildcard, s->mark.n_repeat) == NULL){
+							// TODO: error
+						}
 					}
 				}
-				else{ // type == 1
-					if (word_list_add(&r->bonus, buf) == NULL){
-						// TODO: error
-					}
-				}
 			}
-not_found:
-			j = s->wf.idx.key_len;
+			j = fgetc(s->wf) + s->wf.idx.key_len;
+			i++;
 		}
-		else{
+		else {
 			j++;
 		}
 	}
-	return r; // TODO: not needed but we might want to use return for errors
+	return 0; // TODO: not needed but we might want to use return for errors
 }
 
 // Thread function that grabs the next prefix and processes words beginning with it
@@ -327,10 +397,10 @@ static struct gwl_ret* gwl_thd_func(void* ptr){
 	if (ret == NULL){
 		// TODO: fail
 	}
-	if (!word_list_init(&ret->wl)){
+	if (!word_list_init(&ret->wl, sizeof(struct word_data))){
 		// TODO: fail
 	}
-	if (!word_list_init(&ret->bonus)){
+	if (!word_list_init(&ret->bonus, sizeof(struct word_data))){
 		// TODO: fail
 	}
 	for (;;){
@@ -339,15 +409,14 @@ static struct gwl_ret* gwl_thd_func(void* ptr){
 		if (s->processed < s->wf.idx.sz){
 			x = s->processed++;
 		}
-		else{
+		else {
+			pthread_mutex_unlock(&s->idx_lock);
 			break;
 		}
 		pthread_mutex_unlock(&s->idx_lock);
 		// Append list of relevant words that start with this prefix
 		gwl_parse_prefix(s, ret, x);
 	}
-	// loop broke when thread realized there are no more prefixes left, so it is holding the lock
-	pthread_mutex_unlock(&s->idx_lock);
 	fclose(f);
 	return ret;
 }
@@ -356,50 +425,51 @@ static struct gwl_ret* gwl_thd_func(void* ptr){
 
 // Generate the sorted word list for the given tile list 'board' of length 'len' and word file 'wf'
 // This uses multithreading to find all words and mark the frequencies of each tile
-int get_word_list(struct tile* board, int len, struct word_file* wf, struct word_list_final* f){
+bool get_word_list(struct tile* board, int len, struct word_file* wf, struct word_list* wl, struct word_list* bonus){
 	pthread_t thds[NUM_THDS];
 	struct gwl_ret* r; // heap
 	struct gwl_struct s;
 	int i;
 	s.wf = wf;
-	s.board = board;
-	s.len = len;
-	pthread_mutex_init(&s.board_lock, NULL);
+	s.mark.board = board;
+	s.mark.len = len;
+	pthread_mutex_init(&s.mark.board_lock, NULL);
 	pthread_mutex_init(&s.idx_lock, NULL);
 	s.adjacency_bitmap = bm; // TODO
-	word_list_init(&f->wl);
-	word_list_init(&f->bonus);
+	word_list_init(wl, sizeof(struct word_data));
+	word_list_init(bonus, sizeof(struct word_data));
 	s.processed = 0;
-	s.inc = 1;
+	s.mark.inc = 1;
 	for (i = 0; i < NUM_THDS; i++){
 		if (pthread_create(&thds[i], NULL, gwl_thd_func, &s) != 0){
 			// TODO: error
-			return 0;
+			return FALSE;
 		}
 	}
 	for (i = 0; i < NUM_THDS; i++){
 		pthread_join(thds[i], &r);
 		if (r == NULL){
 			// TODO: fail
-			return 0;
+			return FALSE;
 		}
-		if (!word_list_combine(&f->wl, &r->wl)){
+		if (!word_list_combine(wl, &r->wl)){
 			// TODO: fail
-			return 0;
+			return FALSE;
 		}
-		if (!word_list_combine(&f->bonus, &r->bonus)){
+		if (!word_list_combine(bonus, &r->bonus)){
 			// TODO: fail
-			return 0;
+			return FALSE;
 		}
 		free(r);
 	}
-	word_list_sort(&f->wl);
-	word_list_sort(&f->bonus);
-	word_list_finalize(f);
+	word_list_sort(wl);
+	word_list_finalize(wl);
+	word_list_sort(bonus);
+	word_list_finalize(bonus);
 
 	pthread_mutex_destroy(&s.idx_lock);
-	pthread_mutex_destroy(&s.board_lock);
-	return 1;
+	pthread_mutex_destroy(&s.mark.board_lock);
+	return TRUE;
 }
 
 void get_adjacency_bitmap(struct tile* board, int len, adjacency_bitmap_t bm){
@@ -415,16 +485,32 @@ void get_adjacency_bitmap(struct tile* board, int len, adjacency_bitmap_t bm){
 	}
 } 
 
-void send_word(struct tile_list* tl, struct tile* board, int len){
-	struct gwl_struct gwls;
-	char buffer[TODO_LEN];
-	struct tile_list* next;
+int word_list_has(const struct word_list* wl, const char* buf){
+	size_t l;
 	int i;
-	for (next = tl, i = 0; next != NULL; next = next->next, i++){
-		buffer[i] = next->letter;
+	l = strlen(buf);
+	if (l < MIN_WORD_LEN){
+		return -3; // TODO give these meaning
 	}
-	buffer[i] = 0;
-	if (word_list_has(wl, buffer)){
+	if (wl->idx_sz < l){
+		return -2;
+	}
+	for (i = wl->idx[l - 1]; i < wl->idx[l]; i++){
+		if (!strcmp(wl->ls[i].word, buf)){
+			if (wl->ls[i].found){
+				return -4;
+			}
+			else{
+				return 0;
+			}
+		}
+	}
+	return -1;
+}
+
+void send_word(const char* buf, struct tile* board, int len){
+	struct gwl_struct gwls;
+	if (word_list_has(global_wl, buf)){
 		// Word is valid, decrement freqs
 		gwls.board = board;
 		gwls.len = len;
@@ -433,6 +519,8 @@ void send_word(struct tile_list* tl, struct tile* board, int len){
 		gwl_mark_words(&gwls, buffer);
 		pthread_mutex_destroy(&gwls.board_lock);
 	}
-	tile_list_free(tl);
+	else if (word_list_has(global_bonus, buf)){
+		
+	}
 }
 

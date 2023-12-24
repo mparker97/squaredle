@@ -11,6 +11,9 @@
 #define PIPE_SZ 256
 #define DEFAULT_TIMEOUT 60
 
+struct word_list global_wl;
+struct word_list global_bonus;
+
 // Attempt to read 'sz' bytes from file 'fd' into buffer 'buf'
 // Fail if fewer than 'sz' bytes are read before 'timeout' seconds
 int read_timeout(int fd, void *buf, size_t sz, int timeout){
@@ -20,7 +23,7 @@ int read_timeout(int fd, void *buf, size_t sz, int timeout){
 	FD_ZERO(&set);
 	FD_SET(fd, &set);
 	to.tv_sec = timeout;
-	r = select( fd + 1, &set, NULL, NULL, &to);
+	r = select(fd + 1, &set, NULL, NULL, &to);
 	if (r < 0){
 		// TODO: error
 		return r;
@@ -28,7 +31,7 @@ int read_timeout(int fd, void *buf, size_t sz, int timeout){
 	else if (r == 0){
 		// TODO: timeout
 	}
-	else{
+	else {
 		r = read(fd, buf, sz);
 		if (r < 0){
 			// TODO: read failed
