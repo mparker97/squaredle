@@ -1,27 +1,16 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
-
-struct b{
-	int g;
-	int h;
-};
-
-struct a{
-	int* p;
-	union{
-		struct{
-			int g;
-			int h;
-		};
-		struct b q;
-	};
-	int* c;
-};
+#include <stdbool.h>
+#include <wchar.h>
+#include <locale.h>
 
 int main(int argc, char* argv[]){
-	struct a test;
-	test.g = 1;
-	printf("%d\n", test.g);
+	int i;
+	wchar_t block = 0x2588;
+	setlocale(LC_CTYPE, "");
+	for (i = 0; i < 8; i++){
+		wprintf(L"%lc\n", block + i);
+	}
 	return 0;
 }

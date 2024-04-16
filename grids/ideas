@@ -1,6 +1,7 @@
 contraindications
-^fore
 ^back
+^day, ^night
+^fore
 ^up, ^down
 ^head
 ^heart, ^heat
@@ -9,3 +10,18 @@ contraindications
 ^hyper, ^hypo
 ^imm
 ^inc
+^long
+*love*
+masquerading
+^meta
+^macro, ^micro, ^milli
+^mid
+^max, ^min
+^mis?
+^mono
+^news
+^north, ^south, ^east, ^west
+^occ
+^off, ^on
+^over, ^under
+^para

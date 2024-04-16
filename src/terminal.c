@@ -33,8 +33,8 @@
 
 static struct termios termios;
 static struct termios old_termios;
-static bool terminal_set = 0;
-static bool loop = 1;
+static bool terminal_set = false;
+static bool loop = true;
 
 extern struct word_list global_wl;
 extern struct word_list global_bonus;
@@ -91,6 +91,12 @@ int get_wl_starting_idx(struct terminal_data* td, int* idx, struct word_list** _
 	return -1;
 }
 
+void draw_score_bar(struct terminal_data* td){
+	double progess;
+	progress = (double)(global_score.score) / global_score.total_score * td->screen_sz.c;
+
+}
+
 void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord* word_pos, int start){
 	WORD_BUFFER(buf);
 	int i, j;
@@ -132,7 +138,14 @@ void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord*
 	}
 }
 
-int draw_wl(struct terminal_data* td){
+/*
+Draw both global_wl and global_bonus at the side panel, starting at the current cursor position
+	The word lists must be kept sorted by:
+		length
+			found/not found
+				alphabetically
+*/
+void draw_wl(struct terminal_data* td){
 	struct coord word_pos;
 	struct word_list* wl;
 	int idx, off, concat;
@@ -141,7 +154,7 @@ int draw_wl(struct terminal_data* td){
 	word_pos.r = 0;
 	for (;; wl = &global_bonus){
 		// Iterate through word lengths
-		for (idx = idx; idx < wl->idx_sz; idx++){
+		for (; idx < wl->idx_sz; idx++){
 			// Iterate through words of this length
 			for (; off < wl->idx[idx]; word_pos.r++){
 				if (word_pos.r >= td->wl_sz.r){
@@ -160,7 +173,6 @@ int draw_wl(struct terminal_data* td){
 			break;
 		}
 	}
-	return 1;
 }
 
 void move_wl_v(struct terminal_data* td, int n){
@@ -185,8 +197,23 @@ void move_wl_v(struct terminal_data* td, int n){
 }
 
 int terminal_send_word(struct terminal_data* td){
+	int succ;
+	int sc;
 	// TODO: Make animation of tiles while building?
-	// send_word();
+	// TODO: create tile list and/or verify it can be made
+	succ = send_word(word, td->board, td.board_sz.c * td.board_sz.r);
+	if (succ & WORD_FOUND){
+		sc = score_word(word);
+		if (succ & WORD_BONUS){
+			global_score.bonus_score += sc
+			global_score.bonus_found++;
+		}
+		else{
+			global_score.score += sc;
+			global_score.wl_found++;
+		}
+		
+	}
 }
 
 // NOTE: need to add 1 to x when indexing board string because of newline
@@ -468,7 +495,7 @@ void set_terminal(){
 }
 
 void handler(int sig){
-	loop = 0;
+	loop = false;
 }
 
 int terminal_loop(struct terminal_data* td){

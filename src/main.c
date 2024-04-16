@@ -13,6 +13,7 @@
 
 struct word_list global_wl;
 struct word_list global_bonus;
+struct score global_score;
 
 // Attempt to read 'sz' bytes from file 'fd' into buffer 'buf'
 // Fail if fewer than 'sz' bytes are read before 'timeout' seconds

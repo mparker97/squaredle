@@ -2,6 +2,7 @@
 #define COMMON_H
 
 #include <stdlib.h>
+#include <stdbool.h>
 
 #define DIV_ROUNDUP(x, y) (((x) + (y) - 1) / (y))
 
@@ -69,8 +70,6 @@ void _a_list_deinit(struct a_list* l){
 	free(l->ls);
 	l->ls = NULL;
 }
-
-#define ptr_a_list_deinit(a) _ptr_a_list_deinit((struct ptr_a_list*)(a))
 
 void* _a_list_add(struct a_list* l){
 	if (!(l->sz & (l->sz - 1)) && l->sz >= A_LIST_INIT_SZ){
