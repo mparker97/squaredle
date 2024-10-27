@@ -3,13 +3,17 @@
 #include "common.h"
 
 struct tile{
-  struct tile** neighbors;
-  int start_freq;
-  int freq;
-  unsigned char letter;
-  char can_repeat;
-  char neighors_len;
-	char visited; // ref count
+	struct tile** neighbors;
+	int start_freq;
+	int freq;
+	unsigned char letter;
+	char can_repeat;
+	char neighors_len;
+	// TODO: Still need:
+	// temporarily assigned letter for wildcards
+	// some type of ref count
+		// mark if visited during tile_list building (or number of times visited if can_repeat is true)
+		
 };
 
 struct tile_list{ // linked list

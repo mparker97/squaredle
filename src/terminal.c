@@ -40,15 +40,16 @@ extern struct word_list global_wl;
 extern struct word_list global_bonus;
 
 struct terminal_data{
-	struct tile* board;
-	struct coord board_sz; // In tiles
-	struct coord screen_sz;
-	struct coord wl_sz;
-	struct coord wl_pos;
-	int wl_cursor_pos;
-	word_buffer_t textbox;
-	int textbox_pos;
-	int textbox_cursor_pos;
+	struct tile* board; // Array of tiles, row-major order, of the board
+	struct coord board_sz; // (r, c) size of board, in tiles
+	struct coord screen_sz; // (r, c) size of the screen, in characters
+	struct coord wl_sz; // (r, c) size of the word list, in characters
+	struct coord wl_pos; // (r, c) position of the word list, in characters
+	int wl_cursor_pos; // Vertical position of the cursor in the word list
+	word_buffer_t textbox; // Textbox for word input
+	int textbox_sz; // Horizontal size of the textbox
+	int textbox_word_pos; // How many chars are hidden on the left
+	int textbox_cursor_pos; // Horizontal position of the cursor in the textbox
 	int mode;
 };
 
@@ -108,7 +109,7 @@ void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord*
 	}
 	move_cursor(td->wl_pos.r + word_pos.r, td->wl_pos.c + word_pos.c);
 	j = word_pos.c;
-	if (start){
+	if (start > 0){
 		printf("\xe2\x80\xa6"); // ellipsis
 		start++;
 		j++;
@@ -134,7 +135,7 @@ void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord*
 		}
 	}
 	if (wd->uses_repeat || wd->uses_wildcard){
-		printf("\e[0m");
+		printf("\e[0m"); // clear
 	}
 }
 
@@ -196,6 +197,26 @@ void move_wl_v(struct terminal_data* td, int n){
 	draw_wl(td);
 }
 
+void move_textbox_cursor(struct terminal_data* td, int n){
+	int new = td->textbox_cursor_pos + n;
+	if (new < 0){
+		if (td->textbox_word_pos > 0){
+			td->textbox_word_pos += new;
+			max_update(td->textbox_word_pos, 0);
+		}
+		new = 0;
+	}
+	else if (new > td->textbox_sz - 1){
+		if (td->textbox_word_pos < td->textbox_word_sz - 1){
+			td->textbox_word_pos += new - (td->textbox_sz - 1);
+			min_update(td->textbox_word_pos, td->texbox_word_len - 1);
+		}
+		new = td->textbox_sz - 1;
+	}
+	td->textbox_cursor_pos = new;
+	draw_textbox(td);
+}
+
 int terminal_send_word(struct terminal_data* td){
 	int succ;
 	int sc;
@@ -227,7 +248,7 @@ int terminal_send_word(struct terminal_data* td){
 #define TB_ID (1 << 3) // Down
 const wchar_t TB_I = {
 		/*
-			Bits (paower of 2) assigned to each limb:
+			Bits (power of 2) assigned to each limb:
 					1
 				2	+	4
 					8
@@ -260,24 +281,30 @@ static void setup_tile_frame(){
 		// TODO: error
 		return;
 	}
+	// Horizontal lines
 	for (i = 0; i < TB_TILE_SZ_C; i++){
+		// Right, except for first
 		if (i != 0){
-			TILE_FRAME[i] |= TB_IR;
-			TILE_FRAME[TB_TILE_SZ_C * (TB_TILE_SZ_R - 1) + i] |= TB_IR;
+			TILE_FRAME[i] |= TB_IR; // Up
+			TILE_FRAME[TB_TILE_SZ_C * (TB_TILE_SZ_R - 1) + i] |= TB_IR; // Down
 		}
+		// Left, except for last
 		if (i != TB_TILE_SZ_C - 1){
-			TILE_FRAME[i] |= TB_IL;
-			TILE_FRAME[TB_TILE_SZ_C * (TB_TILE_SZ_R - 1) + i] |= TB_IL;
+			TILE_FRAME[i] |= TB_IL; // Up
+			TILE_FRAME[TB_TILE_SZ_C * (TB_TILE_SZ_R - 1) + i] |= TB_IL; // Down
 		}
 	}
+	// Vertical lines
 	for (i = 0; i < TB_TILE_SZ_R; i++){
+		// Up, except for first
 		if (i != 0){
-			TILE_FRAME[i * TB_TILE_SZ_C] |= TB_IU;
-			TILE_FRAME[(i + 1) * TB_TILE_SZ_C - 1] |= TB_IU;
+			TILE_FRAME[i * TB_TILE_SZ_C] |= TB_IU; // Left
+			TILE_FRAME[(i + 1) * TB_TILE_SZ_C - 1] |= TB_IU; // Right
 		}
+		// Down, except for last
 		if (i != TB_TILE_SZ_R - 1){
-			TILE_FRAME[i * TB_TILE_SZ_C] |= TB_ID;
-			TILE_FRAME[(i + 1) * TB_TILE_SZ_C - 1] |= TB_ID;
+			TILE_FRAME[i * TB_TILE_SZ_C] |= TB_ID; // Left
+			TILE_FRAME[(i + 1) * TB_TILE_SZ_C - 1] |= TB_ID; // Right
 		}
 	}
 }
@@ -301,8 +328,8 @@ void draw_tile(wchar_t* buffer, int nr, int nc, int r, int c){
 	// c = starting col position in buffer (already scaled)
 	int pos, it, i, j;
 	pos = (nc * TB_TILE_SZ_C + 2) * r + c;
-	for (i = 0; i < TB_TILE_SIZE_Y; i++){
-		for (j = 0; j < TB_TILE_SIZE_X; j++){
+	for (i = 0; i < TB_TILE_SZ_R; i++){
+		for (j = 0; j < TB_TILE_SZ_C; j++){
 			it = pos + (nc * TB_TILE_SZ_C + 2) * i + j;
 			buffer[it] = tb_iadd(buffer[it], TILE_FRAME[i * TB_TILE_SZ_C + j]);
 		}
@@ -327,7 +354,7 @@ wchar_t* create_board(const struct terminal_data* td){
 	for (i = 0; i < td->board_sz.r; i++){
 		for (j = 0; j < td->board_sz.c; j++, t++){
 			if (t->letter != ' '){
-				draw_tile(buffer, td->board_sz.r, td->board_sz.c, i * TB_TILE_SIZE_Y, j * TB_TILE_SIZE_X);
+				draw_tile(buffer, td->board_sz.r, td->board_sz.c, i * TB_TILE_SZ_R, j * TB_TILE_SZ_C);
 			}
 		}
 	}
@@ -337,19 +364,19 @@ wchar_t* create_board(const struct terminal_data* td){
 // The board array will be td->sz_x + 1 by td->sz_y. 'sz' is the length of 'str'.
 unsigned char* pad_board(struct terminal_data* td, unsigned char* str, long sz){
 	unsigned char* new;
-	long i, j, k;
+	long i, j, end_of_row;
 	new = malloc(((td->board_sz.c + 1) * td->board_sz.r + 1) * sizeof(unsigned char));
 	if (new == NULL){
 		// TODO: fail
 	}
-	for (i = j = k = 0; i < sz; i++, j++){
+	for (i = j = end_of_row = 0; i < sz; i++, j++){
 		if (str[i] == '\n'){
 			// Pad rest of line with spaces
-			k += td->board_sz.c;
-			for (; j < k; j++){
+			end_of_row += td->board_sz.c;
+			for (; j < end_of_row; j++){
 				new[j] = ' ';
 			}
-			k++;
+			end_of_row++;
 		}
 		new[j] = str[i];
 	}
@@ -363,20 +390,22 @@ unsigned char* pad_board(struct terminal_data* td, unsigned char* str, long sz){
 // The longest line length is returned in td->board_sz.c; the number of lines is returned in td->board_sz.r.
 // The return value must be freed
 unsigned char* read_board_file(FILE* bf, struct terminal_data* td){
-	// TODO: how to show in board file that tile can repeat?
 	unsigned char* ret;
 	long f_sz, i, j;
 	unsigned char c;
+	// Get file size
 	fseek(bf, -1, SEEK_END);
 	f_sz = ftell(bf);
 	if (f_sz < 0){
 		// TODO: error
 	}
+	// Create buffer
 	fseek(bf, 0, SEEK_SET);
 	ret = malloc((f_sz + 2) * sizeof(unsigned char));
 	if (ret == NULL){
 		// TODO: error
 	}
+	// Read into buffer
 	if (fread(ret, f_sz, sizeof(unsigned char), bf) < f_sz){
 		printf("Failed to read all of board file\n");
 		// TODO
@@ -427,10 +456,12 @@ unsigned char* read_board_file(FILE* bf, struct terminal_data* td){
 			continue;
 		}
 		else if (ret[i] != ' '){
-			c = make_uppercase(&ret[i]);
-			if (c < 0){
-				printf("Unexpected character in board file: %c\n", ret[i]);
-				// TODO
+			if (ret[i] != WILDCARD){
+				c = make_uppercase(&ret[i]);
+				if (c < 0){
+					printf("Unexpected character in board file: %c\n", ret[i]);
+					// TODO
+				}
 			}
 			ret[i] = c;
 		}
@@ -473,8 +504,8 @@ void set_tile_neighbors(struct terminal_data* td, int r, int c){
 void reset_terminal(){
 	if (terminal_set){
 		printf("\e[m"); // reset color
-    printf("\e[?25h"); // show cursor
-    fflush(stdout);
+		printf("\e[?25h"); // show cursor
+		fflush(stdout);
 		tcsetattr(0, TCSANOW, &old_termios);
 		terminal_set = 0;
 	}
@@ -484,13 +515,13 @@ void set_terminal(){
 	if (!terminal_set){
 		tcgetattr(0, &old_termios);
 		memcpy(&termios, &old_termios, sizeof(termios));
-    termios.c_lflag &= ~(ICANON | ECHO);
-    termios.c_cc[VMIN] = 0;
-    termios.c_cc[VTIME] = 0;
-    tcsetattr(0, TCSANOW, &termios);
-    printf("\e[?25l"); // hide cursor
+		termios.c_lflag &= ~(ICANON | ECHO);
+		termios.c_cc[VMIN] = 0;
+		termios.c_cc[VTIME] = 0;
+		tcsetattr(0, TCSANOW, &termios);
+		printf("\e[?25l"); // hide cursor
 		terminal_set = 1;
-    atexit(reset_terminal);
+		atexit(reset_terminal);
 	}
 }
 
@@ -514,7 +545,7 @@ int terminal_loop(struct terminal_data* td){
 					case 'C': // RIGHT
 					case 'D': // LEFT
 						if (td->mode == MODE_ENTRY){
-							move_textbox(td, (c - 'C') * 2 - 1); // 'C' -> -1; 'D' -> 1
+							move_textbox_cursor(td, (c - 'C') * 2 - 1); // 'C' -> -1; 'D' -> 1
 						}
 						else if (td->mode == MODE_WL){
 							move_wl_h(t, (c - 'C') * 2 - 1); // 'C' -> -1; 'D' -> 1

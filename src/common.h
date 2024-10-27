@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+#define WILDCARD '*'
+
 #define DIV_ROUNDUP(x, y) (((x) + (y) - 1) / (y))
 
 #define POW2_ROUNDUP(x) \
@@ -35,6 +37,16 @@
 			(x) = (y); \
 		} \
 	} while (0)
+
+char make_uppercase(char c){
+	if (c > 'Z'){
+		c -= 'a' - 'A';
+	}
+	if (*c < 'A' || *c > 'Z'){
+		return -1;
+	}
+	return c;
+}
 
 #define bitmap_set(bm, bit) ((bm)[(bit) / 8] |= (1 << ((bit) % 8)))
 #define bitmap_get(bm, bit) ((bm)[(bit) / 8] & (1 << ((bit) % 8)))
