@@ -20,6 +20,8 @@
 #include <termios.h>
 #include <wchar.h>
 #include "board.h"
+#include "word_list.h"
+#include "gwl.h"
 #include "common.h"
 
 #define MAX_BOARD_SZ_C 50
@@ -105,7 +107,7 @@ void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord*
 		obfuscate_word(buf, wd);
 	}
 	else {
-		strcpy(buf, wd->word);
+		buf = wd->word;
 	}
 	move_cursor(td->wl_pos.r + word_pos.r, td->wl_pos.c + word_pos.c);
 	j = word_pos.c;
@@ -120,14 +122,11 @@ void print_wl_word(struct terminal_data* td, struct word_data* wd, struct coord*
 	if (wd->uses_wildcard){
 		printf("\e[4m"); // underline
 	}
-	for (i = start; j < td->wl_sz.c - 1; i++, j++){
-		if (!buf[i]){
-			break;
-		}
+	for (i = start; j < td->wl_sz.c - 1 && buf[i]; i++, j++){
 		fputc(stdin, buf[i]);
 	}
-	if (!buf[i]){
-		if (buf[i + 1]){
+	if (buf[i]){ // still more to print
+		if (buf[i + 1]){ // not last letter
 			printf("\xe2\x80\xa6"); // ellipsis
 		}
 		else {

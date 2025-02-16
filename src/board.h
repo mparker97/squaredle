@@ -16,11 +16,6 @@ struct tile{
 		
 };
 
-struct tile_list{ // linked list
-	struct tile* tile;
-	struct tile_list* next;
-};
-
 struct score{
 	int wl_found;
 	int bonus_found;
@@ -40,22 +35,6 @@ struct word_data{
 	unsigned char len; // TODO: needed?
 	unsigned char n_repeat; // Minimum number of can_repeat letters
 	unsigned char n_wildcard; // Minimum number of wildcard letters
-};
-
-struct word_list{
-	// a_list fields {
-	struct word_data* ls; // heap memory
-	int sz;
-	int elm_sz;
-	// }
-	struct{
-		int bound; // Cumulative word total by length
-			// So, words of length l are [ idx[l - 1].found, idx[l].found )
-		int not_found; // idx of first not found word of this length
-			// So, found words are [ idx[l - 1].found, idx[l].not_found )
-			// and not found words are [ idx[l].not_found, idx[l].found )
-	}* idx;
-	int idx_sz;
 };
 
 #define ADJACENCY_BM_SZ 26
@@ -100,6 +79,5 @@ int adjacency_bitmap_all(const adjacency_bm_t bm, const unsigned char* buf){
 
 void obfuscate_word(unsigned char* buf, const struct word_data* wd);
 int send_word(const char* buf, struct tile* board, int len);
-bool get_word_list(struct tile* board, int len, struct word_file* wf, struct word_list* wl, struct word_list* bonus);
 
 #endif
